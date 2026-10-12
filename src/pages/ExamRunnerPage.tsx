@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { ChevronRight, ChevronLeft, Flag, AlertTriangle, Check, FileText, Clock, Video, Mic, Upload } from 'lucide-react';
+import { ChevronRight, ChevronLeft, Flag, AlertTriangle, Check, FileText, Clock, Video, Upload } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import { navigate } from '@/hooks/useRouter';
 import { fetchExamById } from '@/services/examService';
@@ -96,6 +96,8 @@ export function ExamRunnerPage({ examId }: ExamRunnerPageProps) {
   const [saving, setSaving] = useState(false);
   const [showSubmitConfirm, setShowSubmitConfirm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [submissionCompleted, setSubmissionCompleted] = useState(false);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [alreadySubmitted, setAlreadySubmitted] = useState(false);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [showFiveMinWarning, setShowFiveMinWarning] = useState(false);
@@ -277,29 +279,40 @@ export function ExamRunnerPage({ examId }: ExamRunnerPageProps) {
 
   // Auto-submit on timer expiry
   const stopRecordingAndUpload = recording.stopAndUpload;
-  const handleTimeExpired = useCallback(async () => {
-    if (submittedRef.current || !attemptRef.current) return;
+  const finishSubmission = useCallback(async (status: 'submitted' | 'auto_submitted') => {
+    const currentAttempt = attemptRef.current;
+    if (!currentAttempt || submitting) return;
     submittedRef.current = true;
     setSubmitting(true);
-    stopRecordingAndUpload().then((saved) => {
-      if (!saved) showToast('تعذّر رفع التسجيل. سيظهر ذلك للإدارة.', 'error');
-    }).catch((err: unknown) => {
-      showToast(err instanceof Error ? err.message : 'تعذّر رفع التسجيل', 'error');
-    });
+    setSubmissionError(null);
+
     try {
-      await submitAndGradeAttempt(attemptRef.current.id, 'auto_submitted');
+      await persistAnswerDraft(currentAttempt.id);
+      const [, recordingSaved] = await Promise.all([
+        submitAndGradeAttempt(currentAttempt.id, status),
+        stopRecordingAndUpload(),
+      ]);
+      setSubmissionCompleted(true);
+
+      if (!recordingSaved) {
+        throw new Error(recording.recordingError ?? 'تعذّر رفع التسجيل. أعد المحاولة أو اختر عرض النتيجة بدونه.');
+      }
+
+      setShowSubmitConfirm(false);
       navigate(`/student/exam/${examId}/done`);
     } catch (err) {
-      submittedRef.current = false;
-      setError(
-        err instanceof Error
-          ? `انتهى الوقت، لكن تعذّر تسليم الامتحان: ${err.message}`
-          : 'انتهى الوقت، لكن تعذّر تسليم الامتحان. تحقق من الاتصال وأعد المحاولة'
-      );
+      setSubmissionError(err instanceof Error ? err.message : 'تعذّر إكمال التسليم');
+      setShowSubmitConfirm(true);
     } finally {
       setSubmitting(false);
     }
-  }, [examId, stopRecordingAndUpload, showToast]);
+  }, [examId, recording.recordingError, stopRecordingAndUpload, submitting]);
+
+  const handleTimeExpired = useCallback(async () => {
+    if (submittedRef.current || !attemptRef.current) return;
+    setShowSubmitConfirm(true);
+    await finishSubmission('auto_submitted');
+  }, [finishSubmission]);
 
   useEffect(() => {
     if (remainingSeconds === 0 && !alreadySubmitted && !loading) {
@@ -352,35 +365,8 @@ export function ExamRunnerPage({ examId }: ExamRunnerPageProps) {
     }
   };
 
-  const handleSubmit = async () => {
-    if (!attempt) return;
-    setSubmitting(true);
-    submittedRef.current = true;
-    try {
-      void recording.stopAndUpload()
-        .then((recordingSaved) => {
-          if (!recordingSaved) {
-            showToast('تم تسليم الإجابات، لكن تعذّر رفع التسجيل. سيظهر ذلك للإدارة.', 'error');
-          }
-        })
-        .catch((err: unknown) => {
-          showToast(
-            err instanceof Error
-              ? `تم تسليم الإجابات، لكن تعذّر رفع التسجيل: ${err.message}`
-              : 'تم تسليم الإجابات، لكن تعذّر رفع التسجيل. سيظهر ذلك للإدارة.',
-            'error'
-          );
-        });
-
-      await persistAnswerDraft(attempt.id);
-      await submitAndGradeAttempt(attempt.id, 'submitted');
-      setShowSubmitConfirm(false);
-      navigate(`/student/exam/${examId}/done`);
-    } catch (err) {
-      submittedRef.current = false;
-      setError(err instanceof Error ? err.message : 'حدث خطأ أثناء التسليم');
-      setSubmitting(false);
-    }
+  const handleSubmit = () => {
+    void finishSubmission(remainingSeconds === 0 ? 'auto_submitted' : 'submitted');
   };
 
   const handleNext = () => {
@@ -490,9 +476,14 @@ export function ExamRunnerPage({ examId }: ExamRunnerPageProps) {
             <div className="flex items-center gap-3">
               {/* Recording indicator */}
               {recording.isRecording && (
-                <span className="flex items-center gap-1.5 rounded-lg bg-red-50 px-2.5 py-1 text-xs font-bold text-red-600">
-                  <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
-                  جاري التسجيل
+                <span
+                  role="status"
+                  aria-label="التسجيل جارٍ"
+                  title="التسجيل جارٍ"
+                  className="flex items-center gap-1.5 rounded-lg bg-gray-100 px-2 py-1 text-xs font-medium text-gray-600"
+                >
+                  <Video className="h-3.5 w-3.5" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
                 </span>
               )}
               {recording.isUploading && (
@@ -667,35 +658,13 @@ export function ExamRunnerPage({ examId }: ExamRunnerPageProps) {
         </div>
       </main>
 
-      {/* Camera preview — fixed bottom corner */}
-      <div className="fixed bottom-4 left-4 z-20">
-        <div className="relative rounded-xl overflow-hidden shadow-lg border-2 border-white bg-gray-900" style={{ width: 120, height: 90 }}>
-          <video
-            ref={recording.videoRef}
-            autoPlay
-            muted
-            playsInline
-            className="w-full h-full object-cover"
-            style={{ transform: 'scaleX(-1)' }}
-          />
-          {/* Recording dot overlay */}
-          {recording.isRecording && (
-            <div className="absolute top-1.5 right-1.5 flex items-center gap-1 rounded bg-black/60 px-1.5 py-0.5">
-              <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
-            </div>
-          )}
-          {/* Icons overlay */}
-          <div className="absolute bottom-1 left-1.5 flex items-center gap-1">
-            <Video className="h-3 w-3 text-white/80" />
-            <Mic className="h-3 w-3 text-white/80" />
-          </div>
-        </div>
-      </div>
-
       {/* Submit confirmation dialog */}
       {showSubmitConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade-in">
-          <div className="absolute inset-0 bg-gray-900/50 backdrop-blur-sm" onClick={() => !submitting && setShowSubmitConfirm(false)} />
+          <div
+            className="absolute inset-0 bg-gray-900/50 backdrop-blur-sm"
+            onClick={() => !submitting && !submissionCompleted && setShowSubmitConfirm(false)}
+          />
           <div className="relative w-full max-w-md card p-6 animate-scale-in">
             <div className="flex items-start gap-4 mb-5">
               <div className="h-12 w-12 rounded-xl bg-green-100 flex items-center justify-center text-green-600 flex-shrink-0">
@@ -704,7 +673,7 @@ export function ExamRunnerPage({ examId }: ExamRunnerPageProps) {
               <div>
                 <h3 className="text-lg font-bold text-gray-900 mb-1">إنهاء الامتحان</h3>
                 <p className="text-sm text-gray-500 leading-relaxed">
-                  هل أنت متأكد من إنهاء الامتحان؟ سيتم حفظ الإجابات وتصحيحها، ويستمر رفع التسجيل في الخلفية.
+                  هل أنت متأكد من إنهاء الامتحان؟ ستظهر النتيجة بعد حفظ الإجابات ورفع التسجيل.
                 </p>
               </div>
             </div>
@@ -721,20 +690,42 @@ export function ExamRunnerPage({ examId }: ExamRunnerPageProps) {
               )}
             </div>
 
+            {submitting && (
+              <div role="status" className="mb-5 rounded-xl bg-blue-50 px-4 py-3 text-sm text-blue-800">
+                {recording.isUploading
+                  ? recording.uploadStatus ?? 'جاري رفع التسجيل، ستظهر النتيجة بعد اكتماله...'
+                  : 'جاري حفظ الإجابات وتصحيحها...'}
+              </div>
+            )}
+
+            {submissionError && (
+              <div role="alert" className="mb-5 rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {submissionError}
+              </div>
+            )}
+
             <div className="flex gap-3">
               <button
-                onClick={() => setShowSubmitConfirm(false)}
+                onClick={() => {
+                  if (submissionCompleted) {
+                    navigate(`/student/exam/${examId}/done`);
+                  } else {
+                    setShowSubmitConfirm(false);
+                  }
+                }}
                 className="btn-secondary flex-1"
                 disabled={submitting}
               >
-                متابعة الامتحان
+                {submissionCompleted ? 'عرض النتيجة دون التسجيل' : 'متابعة الامتحان'}
               </button>
               <button
                 onClick={handleSubmit}
                 disabled={submitting}
                 className="inline-flex items-center justify-center gap-2 rounded-xl bg-green-600 hover:bg-green-700 px-6 py-3 text-sm font-semibold text-white shadow-sm transition-all active:scale-[0.98] flex-1 disabled:opacity-50"
               >
-                {submitting ? 'جاري حفظ الإجابات وتصحيحها...' : 'إنهاء وتصحيح'}
+                {submitting
+                  ? recording.isUploading ? recording.uploadStatus ?? 'جاري رفع التسجيل...' : 'جاري الحفظ والتصحيح...'
+                  : submissionCompleted ? 'إعادة محاولة رفع التسجيل' : 'إنهاء ورفع التسجيل'}
               </button>
             </div>
           </div>
